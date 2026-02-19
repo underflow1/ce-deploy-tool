@@ -32,18 +32,13 @@ gen_uuid() {
 }
 
 # === Универсальная обработка .env ===
-# process_env example_file target_file overwrite_ask
+# process_env example_file target_file
 # Контекст: DOMAIN, DEPLOY_USER, DEPLOY_GROUP, BUILD_OUT_DIR, BACKEND_HOST, BACKEND_PORT и т.д. — глобальные переменные
 process_env() {
-    local example="$1" target="$2" overwrite_ask="$3"
-    local line key val newval default is_placeholder is_secret
+    local example="$1" target="$2"
+    local line key val newval default
 
     [[ -f "$example" ]] || { echo_red "  Файл не найден: $example"; return 1; }
-
-    if [[ -f "$target" && "$overwrite_ask" == "1" ]]; then
-        read -p "  $target существует. Перезаписать? (y/n) [n]: " ans
-        [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]] || { echo_green "  Пропуск (не перезаписываем)."; return 0; }
-    fi
 
     > "$target"
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -218,12 +213,21 @@ deploy_front() {
 
     # --- .env.production ---
     echo_bold "[1/8] Проверка .env.production"
-    if [[ -f "$env_example" ]]; then
-        process_env "$env_example" "$env_prod" 1
-        echo_green "  .env.production готов."
-    else
+    if [[ ! -f "$env_example" ]]; then
         echo_red "  Не найден .env.production.example"
         exit 1
+    fi
+    if [[ -f "$env_prod" ]]; then
+        read -p "  $env_prod существует. Перезаписать? (y/n) [n]: " ans
+        if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
+            echo_green "  Пропуск (не перезаписываем)."
+        else
+            process_env "$env_example" "$env_prod"
+            echo_green "  .env.production готов."
+        fi
+    else
+        process_env "$env_example" "$env_prod"
+        echo_green "  .env.production готов."
     fi
 
     # --- nginx ---
@@ -331,12 +335,21 @@ deploy_back() {
 
     # --- .env ---
     echo_bold "[1/6] Проверка .env"
-    if [[ -f "$env_example" ]]; then
-        process_env "$env_example" "$env_file" 1
-        echo_green "  .env готов."
-    else
+    if [[ ! -f "$env_example" ]]; then
         echo_red "  Не найден .env.example"
         exit 1
+    fi
+    if [[ -f "$env_file" ]]; then
+        read -p "  $env_file существует. Перезаписать? (y/n) [n]: " ans
+        if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
+            echo_green "  Пропуск (не перезаписываем)."
+        else
+            process_env "$env_example" "$env_file"
+            echo_green "  .env готов."
+        fi
+    else
+        process_env "$env_example" "$env_file"
+        echo_green "  .env готов."
     fi
 
     # --- Python venv ---
@@ -349,6 +362,15 @@ deploy_back() {
         run_log apt-get update -qq
         run_log apt-get install -y "python${pyver}-venv" 2>/dev/null || run_log apt-get install -y python3-venv
     }
+    # build-essential, python3-dev — для компиляции пакетов (cryptography и т.п.)
+    if ! dpkg -s build-essential &>/dev/null; then
+        run_log apt-get update -qq
+        run_log apt-get install -y build-essential python3-dev
+    fi
+    # Битый venv (без pip) — пересоздаём
+    if [[ -d "$repo/.venv" ]] && [[ ! -f "$repo/.venv/bin/pip" ]]; then
+        run_log rm -rf "$repo/.venv"
+    fi
     if [[ -d "$repo/.venv" ]]; then
         echo_green "  venv уже существует."
     else
