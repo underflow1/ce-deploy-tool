@@ -1,0 +1,19 @@
+[Unit]
+Description=Backend API Service
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{GROUP}}
+WorkingDirectory={{PROJECT_DIR}}
+Environment="PATH={{PROJECT_DIR}}/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="RELOAD=false"
+ExecStart={{PROJECT_DIR}}/.venv/bin/python3 {{PROJECT_DIR}}/run.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

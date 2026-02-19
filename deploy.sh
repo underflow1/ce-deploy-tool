@@ -22,17 +22,93 @@ run_log() {
 
 trap 'echo_red "Ошибка. Последние строки лога:"; tail -20 "$LOG_FILE" 2>/dev/null; exit 1' ERR
 
+# === Генерация UUID ===
+gen_uuid() {
+    if command -v uuidgen &>/dev/null; then
+        uuidgen
+    else
+        cat /proc/sys/kernel/random/uuid 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32
+    fi
+}
+
+# === Универсальная обработка .env ===
+# process_env example_file target_file overwrite_ask
+# Контекст: DOMAIN, DEPLOY_USER, DEPLOY_GROUP, BUILD_OUT_DIR, BACKEND_HOST, BACKEND_PORT и т.д. — глобальные переменные
+process_env() {
+    local example="$1" target="$2" overwrite_ask="$3"
+    local line key val newval default is_placeholder is_secret
+
+    [[ -f "$example" ]] || { echo_red "  Файл не найден: $example"; return 1; }
+
+    if [[ -f "$target" && "$overwrite_ask" == "1" ]]; then
+        read -p "  $target существует. Перезаписать? (y/n) [n]: " ans
+        [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]] || { echo_green "  Пропуск (не перезаписываем)."; return 0; }
+    fi
+
+    > "$target"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*# ]] || [[ "$line" =~ ^[[:space:]]*$ ]]; then
+            echo "$line" >> "$target"
+            continue
+        fi
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]}"
+            val="${val%$'\r'}"
+            # Плейсхолдер по содержимому (your-, change-, localhost, example)
+            if [[ "$val" =~ (your-|change-|change-in-|example\.|localhost|127\.0\.0\.1) ]]; then
+                # Секрет по содержимому (secret|key|password|token|pepper|random)
+                if [[ "${val,,}" =~ (secret|key|password|token|pepper|random) ]]; then
+                    newval="$(gen_uuid)"
+                else
+                    case "$key" in
+                        BUILD_OUT_DIR) default="${BUILD_OUT_DIR:-/var/www/$DOMAIN}" ;;
+                        VITE_API_BASE_URL) default="https://${DOMAIN:-domain}/api/v1" ;;
+                        DEPLOY_USER) default="${DEPLOY_USER}" ;;
+                        DEPLOY_GROUP) default="${DEPLOY_GROUP:-www-data}" ;;
+                        CORS_ORIGINS) default="https://${DOMAIN:-domain}" ;;
+                        HOST) default="${BACKEND_HOST:-127.0.0.1}" ;;
+                        PORT) default="${BACKEND_PORT:-8000}" ;;
+                        DATABASE_URL) default="sqlite:///./ce_candidates.db" ;;
+                        *) default="$val" ;;
+                    esac
+                    [[ -z "$default" ]] && default="$val"
+                    read -p "  $key [$default]: " newval
+                    newval="${newval:-$default}"
+                fi
+                echo "${key}=${newval}" >> "$target"
+            elif [[ "$key" == "PORT" || "$key" == "HOST" || "$key" == "CORS_ORIGINS" ]] && [[ -n "$DOMAIN" || -n "$BACKEND_PORT" ]]; then
+                # Контекстные ключи — предлагаем заменить даже без плейсхолдера
+                case "$key" in
+                    PORT) default="${BACKEND_PORT:-8000}" ;;
+                    HOST) default="${BACKEND_HOST:-127.0.0.1}" ;;
+                    CORS_ORIGINS) default="https://${DOMAIN:-domain}" ;;
+                    *) default="$val" ;;
+                esac
+                read -p "  $key [$default]: " newval
+                newval="${newval:-$default}"
+                echo "${key}=${newval}" >> "$target"
+            else
+                echo "$line" >> "$target"
+            fi
+        else
+            echo "$line" >> "$target"
+        fi
+    done < "$example"
+    chown "$DEPLOY_USER:$(id -gn "$DEPLOY_USER")" "$target" 2>/dev/null || true
+}
+
 # === Проверка: не запуск от root напрямую ===
 if [ "$EUID" -eq 0 ] && [ -z "${SUDO_USER:-}" ]; then
     echo_red "Ошибка: запуск от root запрещён по соображениям безопасности."
-    echo_yellow "Используйте: sudo ./deploy.sh --front https://github.com/.../repo.git"
+    echo_yellow "Используйте: sudo ./deploy.sh --front|--back https://github.com/.../repo.git"
     exit 1
 fi
 
 # === Требуется sudo ===
 if [ "$EUID" -ne 0 ]; then
     echo_red "Ошибка: скрипт требует прав sudo."
-    echo_yellow "Запустите: sudo ./deploy.sh --front https://github.com/.../repo.git"
+    echo_yellow "Запустите: sudo ./deploy.sh --front|--back https://github.com/.../repo.git"
     exit 1
 fi
 
@@ -62,8 +138,12 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         --back)
-            echo_yellow "Режим --back пока не реализован."
-            exit 1
+            MODE="back"
+            shift
+            if [[ $# -gt 0 && ! "$1" == --* ]]; then
+                REPO_URL="$1"
+                shift
+            fi
             ;;
         *)
             if [[ -z "$REPO_URL" && "$1" != --* ]]; then
@@ -75,7 +155,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$MODE" || -z "$REPO_URL" ]]; then
-    echo_red "Использование: sudo ./deploy.sh --front https://github.com/.../repo.git"
+    echo_red "Использование: sudo ./deploy.sh --front|--back https://github.com/.../repo.git"
     exit 1
 fi
 
@@ -105,23 +185,26 @@ echo ""
 read -p "Домен (например: candidates-dev.teplobit.ru): " DOMAIN
 [[ -z "$DOMAIN" ]] && { echo_red "Домен обязателен."; exit 1; }
 
-read -p "Путь для сборки [/var/www/$DOMAIN]: " BUILD_OUT_DIR_INPUT
-BUILD_OUT_DIR="${BUILD_OUT_DIR_INPUT:-/var/www/$DOMAIN}"
-
-read -p "API URL [https://$DOMAIN/api/v1]: " VITE_API_INPUT
-VITE_API_BASE_URL="${VITE_API_INPUT:-https://$DOMAIN/api/v1}"
-
-read -p "Пользователь для chown [$DEPLOY_USER]: " DEPLOY_USER_INPUT
+read -p "Пользователь [$DEPLOY_USER]: " DEPLOY_USER_INPUT
 DEPLOY_USER="${DEPLOY_USER_INPUT:-$DEPLOY_USER}"
 
-read -p "Группа для chown [www-data]: " DEPLOY_GROUP_INPUT
+read -p "Группа [www-data]: " DEPLOY_GROUP_INPUT
 DEPLOY_GROUP="${DEPLOY_GROUP_INPUT:-www-data}"
 
-read -p "Хост бэкенда [127.0.0.1]: " BACKEND_HOST_INPUT
-BACKEND_HOST="${BACKEND_HOST_INPUT:-127.0.0.1}"
-
-read -p "Порт бэкенда [8000]: " BACKEND_PORT_INPUT
-BACKEND_PORT="${BACKEND_PORT_INPUT:-8000}"
+if [[ "$MODE" == "front" ]]; then
+    read -p "Путь для сборки [/var/www/$DOMAIN]: " BUILD_OUT_DIR_INPUT
+    BUILD_OUT_DIR="${BUILD_OUT_DIR_INPUT:-/var/www/$DOMAIN}"
+    read -p "API URL [https://$DOMAIN/api/v1]: " VITE_API_INPUT
+    VITE_API_BASE_URL="${VITE_API_INPUT:-https://$DOMAIN/api/v1}"
+    read -p "Хост бэкенда [127.0.0.1]: " BACKEND_HOST_INPUT
+    BACKEND_HOST="${BACKEND_HOST_INPUT:-127.0.0.1}"
+    read -p "Порт бэкенда [8000]: " BACKEND_PORT_INPUT
+    BACKEND_PORT="${BACKEND_PORT_INPUT:-8000}"
+elif [[ "$MODE" == "back" ]]; then
+    read -p "Порт бэкенда [8000]: " BACKEND_PORT_INPUT
+    BACKEND_PORT="${BACKEND_PORT_INPUT:-8000}"
+    BACKEND_HOST="127.0.0.1"
+fi
 
 echo ""
 echo_green "Переменные собраны. Запуск..."
@@ -135,21 +218,12 @@ deploy_front() {
 
     # --- .env.production ---
     echo_bold "[1/8] Проверка .env.production"
-    if [[ -f "$env_prod" ]]; then
-        echo_green "  .env.production уже существует."
+    if [[ -f "$env_example" ]]; then
+        process_env "$env_example" "$env_prod" 1
+        echo_green "  .env.production готов."
     else
-        if [[ -f "$env_example" ]]; then
-            cp "$env_example" "$env_prod"
-            sed -i "s|BUILD_OUT_DIR=.*|BUILD_OUT_DIR=$BUILD_OUT_DIR|" "$env_prod"
-            sed -i "s|VITE_API_BASE_URL=.*|VITE_API_BASE_URL=$VITE_API_BASE_URL|" "$env_prod"
-            sed -i "s|DEPLOY_USER=.*|DEPLOY_USER=$DEPLOY_USER|" "$env_prod"
-            sed -i "s|DEPLOY_GROUP=.*|DEPLOY_GROUP=$DEPLOY_GROUP|" "$env_prod"
-            chown "$DEPLOY_USER:$(id -gn "$DEPLOY_USER")" "$env_prod"
-            echo_green "  .env.production создан и заполнен."
-        else
-            echo_red "  Не найден .env.production.example"
-            exit 1
-        fi
+        echo_red "  Не найден .env.production.example"
+        exit 1
     fi
 
     # --- nginx ---
@@ -249,10 +323,87 @@ deploy_front() {
     echo_green "  Сборка завершена."
 }
 
+# === Функция deploy_back ===
+deploy_back() {
+    local repo="$1"
+    local env_file="$repo/.env"
+    local env_example="$repo/.env.example"
+
+    # --- .env ---
+    echo_bold "[1/6] Проверка .env"
+    if [[ -f "$env_example" ]]; then
+        process_env "$env_example" "$env_file" 1
+        echo_green "  .env готов."
+    else
+        echo_red "  Не найден .env.example"
+        exit 1
+    fi
+
+    # --- Python venv ---
+    echo_bold "[2/6] Python venv и зависимости"
+    command -v python3 &>/dev/null || { run_log apt-get update -qq; run_log apt-get install -y python3 python3-venv python3-pip; }
+    if [[ -d "$repo/.venv" ]]; then
+        echo_green "  venv уже существует."
+    else
+        run_log sudo -u "$DEPLOY_USER" env HOME="$USER_HOME" bash -c "cd '$repo' && python3 -m venv .venv"
+        echo_green "  venv создан."
+    fi
+    run_log sudo -u "$DEPLOY_USER" env HOME="$USER_HOME" bash -c "cd '$repo' && .venv/bin/pip install -r requirements.txt -q"
+    echo_green "  Зависимости установлены."
+
+    # --- Alembic ---
+    echo_bold "[3/6] Миграции БД"
+    run_log sudo -u "$DEPLOY_USER" env HOME="$USER_HOME" bash -c "cd '$repo' && .venv/bin/alembic upgrade head"
+    echo_green "  Миграции применены."
+
+    # --- systemd service ---
+    echo_bold "[4/6] systemd service"
+    local tpl=""
+    if [[ -f "$repo/backend.service" ]]; then
+        tpl="$repo/backend.service"
+        echo_green "  Используется backend.service из репозитория."
+    else
+        tpl="$SCRIPT_DIR/backend.service.template"
+        echo_green "  Используется дефолтный backend.service.template."
+    fi
+
+    local svc_name="${REPO_NAME}.service"
+    local svc_file="/etc/systemd/system/$svc_name"
+    sed -e "s|{{USER}}|$DEPLOY_USER|g" -e "s|YOUR_USER|$DEPLOY_USER|g" \
+        -e "s|{{GROUP}}|$DEPLOY_GROUP|g" -e "s|YOUR_GROUP|$DEPLOY_GROUP|g" \
+        -e "s|{{PROJECT_DIR}}|$repo|g" -e "s|PROJECT_DIR|$repo|g" \
+        "$tpl" > "$svc_file"
+    run_log systemctl daemon-reload
+    run_log systemctl enable "$svc_name"
+    run_log systemctl restart "$svc_name"
+    echo_green "  Сервис $svc_name запущен."
+
+    # --- Проверка ---
+    echo_bold "[5/6] Проверка"
+    sleep 2
+    if systemctl is-active --quiet "$svc_name"; then
+        echo_green "  Сервис работает."
+    else
+        echo_red "  Сервис не запустился. Проверьте: journalctl -u $svc_name -n 50"
+        exit 1
+    fi
+
+    echo_bold "[6/6] Готово"
+}
+
 # === Запуск ===
 case "$MODE" in
     front)
         deploy_front "$REPO_PATH"
+        echo ""
+        echo_bold "Готово."
+        echo_green "Фронтенд развёрнут в $BUILD_OUT_DIR"
+        ;;
+    back)
+        deploy_back "$REPO_PATH"
+        echo ""
+        echo_bold "Готово."
+        echo_green "Бэкенд развёрнут. Сервис: ${REPO_NAME}.service"
         ;;
     *)
         echo_red "Неизвестный режим: $MODE"
@@ -260,7 +411,4 @@ case "$MODE" in
         ;;
 esac
 
-echo ""
-echo_bold "Готово."
-echo_green "Фронтенд развёрнут в $BUILD_OUT_DIR"
 echo_green "Лог: $LOG_FILE"
