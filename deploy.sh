@@ -173,12 +173,31 @@ else
 fi
 echo ""
 
-# === Сбор переменных в начале ===
+# === Вопрос о перезаписи .env сразу (до сбора переменных) ===
+SKIP_ENV=0
+if [[ "$MODE" == "front" ]]; then
+    env_file="$REPO_PATH/.env.production"
+    env_example="$REPO_PATH/.env.production.example"
+else
+    env_file="$REPO_PATH/.env"
+    env_example="$REPO_PATH/.env.example"
+fi
+if [[ -f "$env_file" ]] && [[ -f "$env_example" ]]; then
+    read -p "$env_file существует. Перезаписать? (y/n) [n]: " ans
+    if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
+        SKIP_ENV=1
+    fi
+fi
+echo ""
+
+# === Сбор переменных ===
 echo_bold "=== Настройка деплоя (режим: $MODE) ==="
 echo ""
 
-read -p "Домен (например: candidates-dev.teplobit.ru): " DOMAIN
-[[ -z "$DOMAIN" ]] && { echo_red "Домен обязателен."; exit 1; }
+if [[ "$SKIP_ENV" -eq 0 ]] || [[ "$MODE" == "front" ]]; then
+    read -p "Домен (например: candidates-dev.teplobit.ru): " DOMAIN
+    [[ -z "$DOMAIN" ]] && { echo_red "Домен обязателен."; exit 1; }
+fi
 
 read -p "Пользователь [$DEPLOY_USER]: " DEPLOY_USER_INPUT
 DEPLOY_USER="${DEPLOY_USER_INPUT:-$DEPLOY_USER}"
@@ -196,9 +215,14 @@ if [[ "$MODE" == "front" ]]; then
     read -p "Порт бэкенда [8000]: " BACKEND_PORT_INPUT
     BACKEND_PORT="${BACKEND_PORT_INPUT:-8000}"
 elif [[ "$MODE" == "back" ]]; then
-    read -p "Порт бэкенда [8000]: " BACKEND_PORT_INPUT
-    BACKEND_PORT="${BACKEND_PORT_INPUT:-8000}"
+    if [[ "$SKIP_ENV" -eq 0 ]]; then
+        read -p "Порт бэкенда [8000]: " BACKEND_PORT_INPUT
+        BACKEND_PORT="${BACKEND_PORT_INPUT:-8000}"
+    else
+        BACKEND_PORT="8000"
+    fi
     BACKEND_HOST="127.0.0.1"
+    [[ -z "${DOMAIN:-}" ]] && DOMAIN="localhost"
 fi
 
 echo ""
@@ -217,14 +241,11 @@ deploy_front() {
         echo_red "  Не найден .env.production.example"
         exit 1
     fi
-    if [[ -f "$env_prod" ]]; then
-        read -p "  $env_prod существует. Перезаписать? (y/n) [n]: " ans
-        if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
-            echo_green "  Пропуск (не перезаписываем)."
-        else
-            process_env "$env_example" "$env_prod"
-            echo_green "  .env.production готов."
-        fi
+    if [[ "$SKIP_ENV" -eq 1 ]]; then
+        echo_green "  Пропуск (не перезаписываем)."
+    elif [[ -f "$env_prod" ]]; then
+        process_env "$env_example" "$env_prod"
+        echo_green "  .env.production готов."
     else
         process_env "$env_example" "$env_prod"
         echo_green "  .env.production готов."
@@ -339,14 +360,11 @@ deploy_back() {
         echo_red "  Не найден .env.example"
         exit 1
     fi
-    if [[ -f "$env_file" ]]; then
-        read -p "  $env_file существует. Перезаписать? (y/n) [n]: " ans
-        if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
-            echo_green "  Пропуск (не перезаписываем)."
-        else
-            process_env "$env_example" "$env_file"
-            echo_green "  .env готов."
-        fi
+    if [[ "$SKIP_ENV" -eq 1 ]]; then
+        echo_green "  Пропуск (не перезаписываем)."
+    elif [[ -f "$env_file" ]]; then
+        process_env "$env_example" "$env_file"
+        echo_green "  .env готов."
     else
         process_env "$env_example" "$env_file"
         echo_green "  .env готов."
