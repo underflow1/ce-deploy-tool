@@ -417,7 +417,10 @@ deploy_back() {
     sed -e "s|{{USER}}|$DEPLOY_USER|g" -e "s|YOUR_USER|$DEPLOY_USER|g" \
         -e "s|{{GROUP}}|$DEPLOY_GROUP|g" -e "s|YOUR_GROUP|$DEPLOY_GROUP|g" \
         -e "s|{{PROJECT_DIR}}|$repo|g" -e "s|PROJECT_DIR|$repo|g" \
+        -e "s|{{PORT}}|${BACKEND_PORT:-8000}|g" \
         "$tpl" > "$svc_file"
+    # Замена run.py на uvicorn (если в репо старый формат)
+    sed -i 's|/python3 [^ ]*run\.py|/uvicorn app.main:app --host 127.0.0.1 --port '"${BACKEND_PORT:-8000}"'|g' "$svc_file"
     run_log systemctl daemon-reload
     run_log systemctl enable "$svc_name"
     run_log systemctl restart "$svc_name"
