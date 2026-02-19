@@ -373,13 +373,11 @@ deploy_back() {
     # --- Python venv ---
     echo_bold "[2/6] Python venv и зависимости"
     command -v python3 &>/dev/null || { run_log apt-get update -qq; run_log apt-get install -y python3; }
-    # python3.X-venv — отдельный пакет, проверяем от того же пользователя, что создаёт venv
+    # python3.X-venv — всегда ставим (ensurepip внутри venv требует его)
     local pyver
     pyver=$(sudo -u "$DEPLOY_USER" env HOME="$USER_HOME" python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "3")
-    sudo -u "$DEPLOY_USER" env HOME="$USER_HOME" python3 -c "import venv" 2>/dev/null || {
-        run_log apt-get update -qq
-        run_log apt-get install -y "python${pyver}-venv" || run_log apt-get install -y python3-venv
-    }
+    run_log apt-get update -qq
+    run_log apt-get install -y "python${pyver}-venv" 2>/dev/null || run_log apt-get install -y python3-venv
     # build-essential, python3-dev — для компиляции пакетов (cryptography и т.п.)
     if ! dpkg -s build-essential &>/dev/null; then
         run_log apt-get update -qq
