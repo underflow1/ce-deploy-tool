@@ -355,7 +355,7 @@ deploy_back() {
     local env_example="$repo/.env.example"
 
     # --- .env ---
-    echo_bold "[1/6] Проверка .env"
+    echo_bold "[1/7] Проверка .env"
     if [[ ! -f "$env_example" ]]; then
         echo_red "  Не найден .env.example"
         exit 1
@@ -371,7 +371,7 @@ deploy_back() {
     fi
 
     # --- Python venv ---
-    echo_bold "[2/6] Python venv и зависимости"
+    echo_bold "[2/7] Python venv и зависимости"
     command -v python3 &>/dev/null || { run_log apt-get update -qq; run_log apt-get install -y python3; }
     # python3.X-venv — всегда ставим (ensurepip внутри venv требует его)
     local pyver
@@ -397,12 +397,12 @@ deploy_back() {
     echo_green "  Зависимости установлены."
 
     # --- Alembic ---
-    echo_bold "[3/6] Миграции БД"
+    echo_bold "[3/7] Миграции БД"
     run_log sudo -u "$DEPLOY_USER" env HOME="$USER_HOME" bash -c "cd '$repo' && .venv/bin/alembic upgrade head"
     echo_green "  Миграции применены."
 
     # --- systemd service ---
-    echo_bold "[4/6] systemd service"
+    echo_bold "[4/7] systemd service"
     local tpl=""
     if [[ -f "$repo/backend.service" ]]; then
         tpl="$repo/backend.service"
@@ -423,8 +423,21 @@ deploy_back() {
     run_log systemctl restart "$svc_name"
     echo_green "  Сервис $svc_name запущен."
 
+    # --- sudoers для управления сервисом ---
+    echo_bold "[5/7] sudoers (systemctl, journalctl)"
+    local sudoers_file="/etc/sudoers.d/$REPO_NAME"
+    {
+        echo "${DEPLOY_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart $svc_name"
+        echo "${DEPLOY_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop $svc_name"
+        echo "${DEPLOY_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl start $svc_name"
+        echo "${DEPLOY_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl status $svc_name"
+        echo "${DEPLOY_USER} ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u $svc_name *"
+    } > "$sudoers_file"
+    chmod 440 "$sudoers_file"
+    echo_green "  sudoers настроен."
+
     # --- Проверка ---
-    echo_bold "[5/6] Проверка"
+    echo_bold "[6/7] Проверка"
     sleep 2
     if systemctl is-active --quiet "$svc_name"; then
         echo_green "  Сервис работает."
@@ -433,7 +446,7 @@ deploy_back() {
         exit 1
     fi
 
-    echo_bold "[6/6] Готово"
+    echo_bold "[7/7] Готово"
 }
 
 # === Запуск ===
